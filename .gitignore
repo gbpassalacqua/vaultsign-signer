@@ -7,11 +7,14 @@
 # Test artifacts
 *.test
 *.out
-sig.p7s
+*.p7s
 *.cms
-ping.json
-ping.bin
+*.pem
 *.cer
+*.bin
+ping.json
+sign_resp*.json
+msg.txt
 
 # Editor / OS
 .idea/

@@ -126,6 +126,27 @@ func certInfoFromContext(ctx *windows.CertContext) (CertInfo, bool) {
 var (
 	modCrypt32                            = windows.NewLazySystemDLL("crypt32.dll")
 	procCertGetCertificateContextProperty = modCrypt32.NewProc("CertGetCertificateContextProperty")
+
+	modAdvapi32              = windows.NewLazySystemDLL("advapi32.dll")
+	procCryptAcquireContextW = modAdvapi32.NewProc("CryptAcquireContextW")
+	procCryptReleaseContext  = modAdvapi32.NewProc("CryptReleaseContext")
+	procCryptCreateHash      = modAdvapi32.NewProc("CryptCreateHash")
+	procCryptSetHashParam    = modAdvapi32.NewProc("CryptSetHashParam")
+	procCryptSignHashW       = modAdvapi32.NewProc("CryptSignHashW")
+	procCryptDestroyHash     = modAdvapi32.NewProc("CryptDestroyHash")
+)
+
+// CryptoAPI legacy constants. We always sign through PROV_RSA_AES rather
+// than the cert's bound provider because A1 ICP-Brasil certs are typically
+// imported under "Microsoft Enhanced Cryptographic Provider v1.0" which
+// pre-dates SHA-256 — CryptCreateHash with CALG_SHA_256 returns NTE_BAD_ALGID
+// on that provider. PROV_RSA_AES sees the same key container and supports
+// SHA-256 natively.
+const (
+	provRsaAes  = 24         // PROV_RSA_AES
+	calgSha256  = 0x0000800c // CALG_SHA_256
+	hpHashval   = 2          // HP_HASHVAL
+	atSignature = 2          // AT_SIGNATURE — the canonical key spec for sign-only RSA keys
 )
 
 // certHasPrivateKey checks for the CERT_KEY_PROV_INFO property without
@@ -139,6 +160,212 @@ func certHasPrivateKey(ctx *windows.CertContext) bool {
 		uintptr(unsafe.Pointer(&size)),
 	)
 	return r1 != 0 && size > 0
+}
+
+// cryptKeyProvInfoRaw mirrors the C struct CRYPT_KEY_PROV_INFO. The
+// pointers refer back into the buffer returned by
+// CertGetCertificateContextProperty, so use the data immediately and
+// don't store the struct beyond the buffer's lifetime — we copy the
+// container name out before returning.
+type cryptKeyProvInfoRaw struct {
+	ContainerName  *uint16
+	ProvName       *uint16
+	ProvType       uint32
+	Flags          uint32
+	ProvParamCount uint32
+	ProvParam      uintptr
+	KeySpec        uint32
+}
+
+// keyProvInfo is the Go-managed snapshot we hand around internally.
+type keyProvInfo struct {
+	ContainerName []uint16 // null-terminated UTF-16
+	KeySpec       uint32
+}
+
+// SignHash signs an externally-computed SHA-256 digest with the private
+// key bound to the certificate identified by thumbprint. Returns the raw
+// signature bytes (big-endian, ready for CMS/PKCS#1) plus the cert DER.
+//
+// The caller never sees the private key. The hash flows in, the
+// signature flows out — that is the entire trust boundary.
+func SignHash(thumbprint string, hash []byte) (rawSig []byte, certDER []byte, err error) {
+	if len(hash) != 32 {
+		return nil, nil, fmt.Errorf("expected 32-byte SHA-256 digest, got %d", len(hash))
+	}
+
+	ctx, err := findByThumbprint(thumbprint)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer windows.CertFreeCertificateContext(ctx)
+
+	derSrc := unsafe.Slice(ctx.EncodedCert, int(ctx.Length))
+	certDER = make([]byte, len(derSrc))
+	copy(certDER, derSrc)
+
+	info, err := getKeyProvInfo(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get CRYPT_KEY_PROV_INFO: %w", err)
+	}
+
+	// Acquire context against the key's container using PROV_RSA_AES.
+	// Provider name = NULL → uses the default for PROV_RSA_AES, i.e.
+	// "Microsoft Enhanced RSA and AES Cryptographic Provider".
+	var hProv uintptr
+	var containerPtr uintptr
+	if len(info.ContainerName) > 0 {
+		containerPtr = uintptr(unsafe.Pointer(&info.ContainerName[0]))
+	}
+	r1, _, callErr := procCryptAcquireContextW.Call(
+		uintptr(unsafe.Pointer(&hProv)),
+		containerPtr,
+		0,                  // pszProvider = NULL → default for ProvType
+		uintptr(provRsaAes), // dwProvType = PROV_RSA_AES (supports SHA-256)
+		0,                  // dwFlags = 0 → full access for signing
+	)
+	if r1 == 0 {
+		return nil, nil, fmt.Errorf("CryptAcquireContextW (PROV_RSA_AES, container=%q): %w",
+			utf16ToString(info.ContainerName), callErr)
+	}
+	defer procCryptReleaseContext.Call(hProv, 0)
+
+	// Create a SHA-256 hash object and inject the externally-computed digest.
+	var hHash uintptr
+	r1, _, callErr = procCryptCreateHash.Call(
+		hProv, uintptr(calgSha256), 0, 0, uintptr(unsafe.Pointer(&hHash)),
+	)
+	if r1 == 0 {
+		return nil, nil, fmt.Errorf("CryptCreateHash(CALG_SHA_256): %w", callErr)
+	}
+	defer procCryptDestroyHash.Call(hHash)
+
+	r1, _, callErr = procCryptSetHashParam.Call(
+		hHash, uintptr(hpHashval), uintptr(unsafe.Pointer(&hash[0])), 0,
+	)
+	if r1 == 0 {
+		return nil, nil, fmt.Errorf("CryptSetHashParam(HP_HASHVAL): %w", callErr)
+	}
+
+	// Sign — first call to size, second to fill. Use the KeySpec from the
+	// cert's CRYPT_KEY_PROV_INFO (typically AT_SIGNATURE for ICP-Brasil).
+	keySpec := info.KeySpec
+	if keySpec == 0 {
+		keySpec = atSignature
+	}
+	var sigLen uint32
+	r1, _, callErr = procCryptSignHashW.Call(
+		hHash, uintptr(keySpec), 0, 0, 0, uintptr(unsafe.Pointer(&sigLen)),
+	)
+	if r1 == 0 {
+		return nil, nil, fmt.Errorf("CryptSignHash size query: %w", callErr)
+	}
+
+	rawSig = make([]byte, sigLen)
+	r1, _, callErr = procCryptSignHashW.Call(
+		hHash, uintptr(keySpec), 0, 0,
+		uintptr(unsafe.Pointer(&rawSig[0])),
+		uintptr(unsafe.Pointer(&sigLen)),
+	)
+	if r1 == 0 {
+		return nil, nil, fmt.Errorf("CryptSignHash: %w", callErr)
+	}
+	rawSig = rawSig[:sigLen]
+
+	// CryptoAPI legacy emits the RSA signature in little-endian word order.
+	// CMS / PKCS#1 expect big-endian. Reverse in place.
+	for i, j := 0, len(rawSig)-1; i < j; i, j = i+1, j-1 {
+		rawSig[i], rawSig[j] = rawSig[j], rawSig[i]
+	}
+
+	return rawSig, certDER, nil
+}
+
+func findByThumbprint(thumbprint string) (*windows.CertContext, error) {
+	storeName, err := windows.UTF16PtrFromString("MY")
+	if err != nil {
+		return nil, err
+	}
+	store, err := windows.CertOpenStore(
+		windows.CERT_STORE_PROV_SYSTEM,
+		0, 0,
+		windows.CERT_SYSTEM_STORE_CURRENT_USER,
+		uintptr(unsafe.Pointer(storeName)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("CertOpenStore: %w", err)
+	}
+
+	target := strings.ToUpper(thumbprint)
+	var ctx, dup *windows.CertContext
+	for {
+		ctx, err = windows.CertEnumCertificatesInStore(store, ctx)
+		if ctx == nil {
+			break
+		}
+		der := unsafe.Slice(ctx.EncodedCert, int(ctx.Length))
+		sum := sha1.Sum(der)
+		if strings.ToUpper(hex.EncodeToString(sum[:])) == target {
+			dup = windows.CertDuplicateCertificateContext(ctx)
+			break
+		}
+	}
+	windows.CertCloseStore(store, 0)
+	if dup == nil {
+		return nil, fmt.Errorf("certificate %q not found in CurrentUser\\My", thumbprint)
+	}
+	return dup, nil
+}
+
+func getKeyProvInfo(ctx *windows.CertContext) (*keyProvInfo, error) {
+	var size uint32
+	r1, _, _ := procCertGetCertificateContextProperty.Call(
+		uintptr(unsafe.Pointer(ctx)),
+		uintptr(certKeyProvInfoPropID),
+		0,
+		uintptr(unsafe.Pointer(&size)),
+	)
+	if r1 == 0 || size == 0 {
+		return nil, errors.New("cert has no CERT_KEY_PROV_INFO property")
+	}
+
+	buf := make([]byte, size)
+	r1, _, _ = procCertGetCertificateContextProperty.Call(
+		uintptr(unsafe.Pointer(ctx)),
+		uintptr(certKeyProvInfoPropID),
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(unsafe.Pointer(&size)),
+	)
+	if r1 == 0 {
+		return nil, errors.New("CertGetCertificateContextProperty failed")
+	}
+
+	raw := (*cryptKeyProvInfoRaw)(unsafe.Pointer(&buf[0]))
+	info := &keyProvInfo{
+		KeySpec: raw.KeySpec,
+	}
+	if raw.ContainerName != nil {
+		// Walk the null-terminated UTF-16 string and copy into Go memory
+		// so the caller can keep using it after `buf` is GC'd.
+		n := 0
+		for *(*uint16)(unsafe.Add(unsafe.Pointer(raw.ContainerName), uintptr(n*2))) != 0 {
+			n++
+		}
+		info.ContainerName = make([]uint16, n+1) // include NUL
+		copy(info.ContainerName, unsafe.Slice(raw.ContainerName, n+1))
+	}
+	return info, nil
+}
+
+func utf16ToString(s []uint16) string {
+	if len(s) == 0 {
+		return ""
+	}
+	// Drop trailing NUL if present.
+	if s[len(s)-1] == 0 {
+		s = s[:len(s)-1]
+	}
+	return windows.UTF16ToString(s)
 }
 
 // parseICPBrasilSAN extracts CPF (PF) or CNPJ (PJ) from the certificate's
