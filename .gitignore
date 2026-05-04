@@ -16,6 +16,12 @@ ping.json
 sign_resp*.json
 msg.txt
 
+# Generated files (paths are environment-specific)
+host/com.vaultsign.signer.json
+
+# Extension dev key (private; manifest's "key" field has the public half)
+extension/extension-key.pem
+
 # Editor / OS
 .idea/
 .vscode/

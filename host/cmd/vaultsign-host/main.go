@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/gbpassalacqua/vaultsign-signer/host/internal/certstore"
 	"github.com/gbpassalacqua/vaultsign-signer/host/internal/cms"
@@ -34,8 +35,19 @@ type signRequest struct {
 }
 
 func main() {
-	log.SetOutput(os.Stderr)
-	log.SetFlags(log.Ltime | log.Lmicroseconds)
+	// During dev we mirror logs to %TEMP%\vaultsign-host.log so the user
+	// can tail it while Chrome owns stdin/stdout. Stderr stays connected
+	// in case the binary is run from a terminal.
+	logPath := filepath.Join(os.TempDir(), "vaultsign-host.log")
+	logWriter := io.Writer(os.Stderr)
+	if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		logWriter = io.MultiWriter(os.Stderr, f)
+		defer f.Close()
+	}
+	log.SetOutput(logWriter)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.Printf("vaultsign-host %s starting (pid=%d, log=%s)", version, os.Getpid(), logPath)
+	defer log.Printf("vaultsign-host exiting")
 
 	for {
 		raw, err := protocol.ReadMessage(os.Stdin)
@@ -49,9 +61,11 @@ func main() {
 
 		var req request
 		if err := json.Unmarshal(raw, &req); err != nil {
+			log.Printf("recv: invalid JSON (%d bytes): %v", len(raw), err)
 			writeError(os.Stdout, "", fmt.Sprintf("invalid JSON: %v", err))
 			continue
 		}
+		log.Printf("recv action=%q (%d bytes)", req.Action, len(raw))
 
 		switch req.Action {
 		case "ping":

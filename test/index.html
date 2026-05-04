@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>VaultSign Signer — Dev Test</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+      max-width: 960px;
+      margin: 2rem auto;
+      padding: 0 1.25rem;
+      color: #1a1a1a;
+      line-height: 1.5;
+    }
+    h1 { margin: 0 0 0.25rem; }
+    .sub { color: #666; margin: 0 0 1.5rem; font-size: 0.9rem; }
+    #status {
+      padding: 0.6rem 0.9rem;
+      border-radius: 6px;
+      background: #f3f4f6;
+      margin-bottom: 1.25rem;
+      font-size: 0.95rem;
+    }
+    #status.ok { background: #ecfdf5; color: #065f46; }
+    #status.err { background: #fef2f2; color: #991b1b; }
+    button {
+      padding: 0.65rem 1.25rem;
+      font-size: 0.95rem;
+      font-weight: 500;
+      border-radius: 6px;
+      border: 1px solid #d4d4d8;
+      background: white;
+      cursor: pointer;
+      margin-right: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+    button:hover:not(:disabled) { background: #f4f4f5; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.primary { background: #4a3ac0; color: white; border-color: #4a3ac0; }
+    button.primary:hover:not(:disabled) { background: #3d30a0; }
+    pre {
+      background: #1e1e1e;
+      color: #e0e0e0;
+      padding: 1rem;
+      border-radius: 6px;
+      overflow: auto;
+      max-height: 60vh;
+      font-size: 0.85rem;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    pre.err { background: #4c1d24; color: #fca5a5; }
+    label { font-size: 0.9rem; color: #444; }
+    input[type=text] {
+      width: 100%;
+      padding: 0.55rem 0.75rem;
+      border: 1px solid #d4d4d8;
+      border-radius: 6px;
+      font-family: ui-monospace, monospace;
+      font-size: 0.85rem;
+      margin-top: 0.25rem;
+      margin-bottom: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>VaultSign Signer — Dev Test</h1>
+  <p class="sub">Página local servida em <code>http://localhost:8080</code> para validar o pipeline página → content script → background → native host → Windows.</p>
+
+  <div id="status">extensão: detectando…</div>
+
+  <p>
+    <button id="ping">Ping</button>
+    <button id="list" class="primary">List Certs</button>
+    <button id="sign" class="primary">Sign Hash</button>
+  </p>
+
+  <label for="thumbprint">Thumbprint para Sign Hash:</label>
+  <input id="thumbprint" type="text" value="803FC75B1E4A752869447843939458984FDD2101">
+  <p class="sub" style="margin-top:-0.5rem">Padrão: giuliano CPF. Outro: <code>4E039A48E2CAA72BA0D0D7DAABBC5F687CF72B14</code> (MALUMAR CNPJ).</p>
+
+  <pre id="out">(clique um botão)</pre>
+
+  <script src="app.js"></script>
+</body>
+</html>

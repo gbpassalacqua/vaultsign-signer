@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "VaultSign Signer (Dev)",
+  "version": "0.1.0",
+  "description": "Bridges vaultsign.app to ICP-Brasil certificates installed on this machine.",
+  "permissions": ["nativeMessaging"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://localhost:8080/*"],
+      "js": ["content-script.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAt1rvr9guP705jR0sCRQdA1zufBj8VGE3UCrAIJkKMxMLdnJ8JI0ih+8aVpD1kMvVLMlx/vhx9s3YVmkj/xEDdB905/aj4QwHCiRHrwr4EpGALzX6sjYMnjcD/Vo+zGTE/NFJDL+ZFaFvbktFR7Qn5FNHxi8AIHWuIXQqIG/MF3DBHU7HGDiJRM8HOZKvK1gen1sQ59bXp+dx0gD7pnLTmD7/+7EkmHWt4brPbR/SyBwtcpSxJ9f5nMDyAXfHbzyVjYgZn0qVgU2qYJ5EbKHMKC6rtcKC6kSRfXP87fUoPzlfBvU3nK0w0bSOKRymbG9Hst3gBhuhkk6rrwG3C5aWZQIDAQAB"
+}
