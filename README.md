@@ -178,3 +178,7 @@ test/
   index.html             # 3-button dev page (ping / list / sign)
   app.js                 # Talks to extension via window.postMessage
 ```
+
+## License
+
+[MIT](./LICENSE) — Copyright (c) 2026 Giuliano Passalacqua / Rocket99 Ventures LLC.
