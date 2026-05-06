@@ -22,6 +22,9 @@ host/com.vaultsign.signer.json
 # Extension dev key (private; manifest's "key" field has the public half)
 extension/extension-key.pem
 
+# Build output (Chrome Web Store packaging)
+dist/
+
 # Editor / OS
 .idea/
 .vscode/
