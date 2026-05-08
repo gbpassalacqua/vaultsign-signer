@@ -2,6 +2,34 @@
 
 Lessons learned the hard way. Read these before debugging anything weird.
 
+## Chrome Web Store publication — 2026-05-08
+
+Extension was approved and published on the Chrome Web Store on
+**May 8, 2026**.
+
+- **Listing URL:** https://chromewebstore.google.com/detail/vaultsign-signer/daaihfchoifcjlkiiafinacokmmphnde
+- **Store extension ID:** `daaihfchoifcjlkiiafinacokmmphnde`
+- **Dev (Load Unpacked) extension ID:** `ijlgpagoomkbimmghbimheocgneioibn`
+
+The Store ID differs from the dev ID because the Web Store strips the
+`key` field from `manifest.json` and re-derives the ID from a fresh
+keypair Google manages. We keep the `key` field in `extension/manifest.json`
+(dev manifest) so unpacked reloads stay on the stable dev ID, and
+strip it from `extension/manifest.store.json` (Store-bound manifest) so
+the upload doesn't get rejected.
+
+The native host's `com.vaultsign.signer.json` `allowed_origins` lists
+**both IDs** so a single host install works for:
+
+- developers running the unpacked extension locally, AND
+- end users who installed the extension from the Web Store.
+
+When changes to that allowlist are needed, edit
+`host/com.vaultsign.signer.template.json` (versioned). The
+`host/com.vaultsign.signer.json` actually consumed by Chrome is generated
+from the template by `host/scripts/install-native-host.ps1` and is
+gitignored because the absolute `path` is machine-specific.
+
 ## Agent / sandboxed shell quirk: HKCU registry writes can be virtualized
 
 If you're running setup commands from inside an agent runtime (e.g.,

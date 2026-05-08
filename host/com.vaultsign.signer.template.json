@@ -1,7 +1,10 @@
 {
   "name": "com.vaultsign.signer",
-  "description": "VaultSign Signer Native Host (dev)",
+  "description": "VaultSign Signer Native Host",
   "path": "__HOST_PATH__",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://__EXTENSION_ID__/"]
+  "allowed_origins": [
+    "chrome-extension://ijlgpagoomkbimmghbimheocgneioibn/",
+    "chrome-extension://daaihfchoifcjlkiiafinacokmmphnde/"
+  ]
 }
