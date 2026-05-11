@@ -1,11 +1,19 @@
 {
   "manifest_version": 3,
   "name": "VaultSign Signer (Dev)",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Bridges vaultsign.app to ICP-Brasil certificates installed on this machine.",
   "permissions": ["nativeMessaging"],
   "background": {
     "service_worker": "background.js"
+  },
+  "externally_connectable": {
+    "matches": [
+      "https://vaultsign.app/*",
+      "https://*.vaultsign.app/*",
+      "http://localhost:8080/*",
+      "https://*.vercel.app/*"
+    ]
   },
   "content_scripts": [
     {

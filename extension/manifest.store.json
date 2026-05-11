@@ -1,13 +1,19 @@
 {
   "manifest_version": 3,
   "name": "VaultSign Signer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Sign documents on vaultsign.app with your ICP-Brasil digital certificate. Qualified electronic signature (MP 2.200-2/01).",
   "author": "VaultSign / Rocket99 Ventures LLC",
   "homepage_url": "https://vaultsign.app",
   "permissions": ["nativeMessaging"],
   "background": {
     "service_worker": "background.js"
+  },
+  "externally_connectable": {
+    "matches": [
+      "https://vaultsign.app/*",
+      "https://*.vaultsign.app/*"
+    ]
   },
   "content_scripts": [
     {

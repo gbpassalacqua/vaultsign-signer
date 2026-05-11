@@ -6,8 +6,20 @@
 // disconnect. Requests to the native host are serialized through a FIFO
 // queue: the host responds in the order requests arrive, so we just
 // match the next-pending callback to each incoming response.
+//
+// Two ingress paths share the same handler:
+//   1. chrome.runtime.onMessage         — internal, used by the content
+//      script injected into vaultsign.app pages on navigation.
+//   2. chrome.runtime.onMessageExternal — external, used by SDK code
+//      running directly on vaultsign.app pages via the
+//      externally_connectable manifest entry. This path is essential when
+//      the user installs the extension into an already-open tab — the
+//      content script does not retroactively inject into existing pages,
+//      but onMessageExternal works immediately on the next sendMessage call.
 
 const HOST_NAME = "com.vaultsign.signer";
+const REQUEST_TYPE = "VAULTSIGN_SIGNER_REQUEST";
+const RESPONSE_TYPE = "VAULTSIGN_SIGNER_RESPONSE";
 
 let port = null;
 const pending = []; // FIFO of { resolve, reject } callbacks
@@ -53,19 +65,37 @@ function nativeRequest(payload) {
   });
 }
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Only relay requests that match our protocol shape. Strip transport-only
-  // fields (type, requestId) before forwarding to the host — the page-level
-  // requestId is round-tripped by the content script, not the host.
-  if (!message || message.type !== "VAULTSIGN_SIGNER_REQUEST") return false;
+// Shared handler registered on both onMessage and onMessageExternal so
+// content-script-routed messages and externally_connectable-routed messages
+// take the same code path. The response is always wrapped with
+// { type: VAULTSIGN_SIGNER_RESPONSE, requestId, ... } so SDK callers see a
+// consistent shape regardless of how they reached us.
+function handleRequest(message, sender, sendResponse) {
+  if (!message || message.type !== REQUEST_TYPE) return false;
 
   const { type, requestId, ...payload } = message;
+
   nativeRequest(payload)
-    .then((resp) => sendResponse(resp))
-    .catch((err) => sendResponse({ error: err.message || String(err) }));
+    .then((resp) => {
+      sendResponse({
+        type: RESPONSE_TYPE,
+        requestId,
+        ...resp,
+      });
+    })
+    .catch((err) => {
+      sendResponse({
+        type: RESPONSE_TYPE,
+        requestId,
+        error: err.message || String(err),
+      });
+    });
 
   return true; // keep the message channel open for the async sendResponse
-});
+}
+
+chrome.runtime.onMessage.addListener(handleRequest);
+chrome.runtime.onMessageExternal.addListener(handleRequest);
 
 function summarize(obj) {
   // Avoid logging giant base64 blobs in the console.
