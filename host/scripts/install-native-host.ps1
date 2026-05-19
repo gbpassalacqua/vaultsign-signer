@@ -49,44 +49,70 @@ if (-not (Test-Path $templatePath)) {
 # Authenticode-sign the binary if Smart App Control is on AND the
 # binary doesn't already carry a valid (trusted-chain) signature.
 #
-# Three signature states matter:
-#   1. Valid                - production-signed (Trusted Signing / SignPath
-#                             / EV cert). Trust chain reaches a CA in the
-#                             Microsoft Trusted Root Program. Leave it
-#                             ALONE — re-signing with the dev cert would
-#                             downgrade it.
-#   2. UnknownError /        - signed but trust chain doesn't terminate
-#      NotTrusted              at a trusted root (self-signed dev cert,
-#                              or signed by a cert removed from the store).
-#                              Re-sign with the current dev cert.
-#   3. NotSigned             - no signature at all. Sign with dev cert.
+# Signature states + handling (triple-safe):
 #
-# State (1) is the new normal once CI starts shipping signed binaries —
-# devs should be able to drop a release artifact into host/ and run this
-# script without it stomping the production signature.
+#   Status = Valid
+#       → Production-signed (Microsoft Trusted Signing, EV cert, etc).
+#         Chain reaches a Microsoft-Trusted Root. LEAVE IT ALONE —
+#         re-signing would downgrade the trust level. This is the
+#         expected state for CI-built release artifacts.
+#
+#   Status != Valid AND SignerCertificate.Thumbprint matches current
+#   dev cert
+#       → Already self-signed with this machine's dev cert. Idempotent
+#         skip; SAC re-evaluates on each launch but the existing sig
+#         is fine.
+#
+#   Status = NotSigned
+#       → No signature at all. Sign with dev cert.
+#
+#   Status != Valid AND SignerCertificate.Subject = "CN=VaultSign Dev"
+#   (stale dev cert, e.g. expired or different machine)
+#       → Re-sign with current dev cert.
+#
+#   Status != Valid AND signed by an UNKNOWN certificate (not Valid,
+#   not VaultSign Dev)
+#       → Refuse to re-sign. Warn loudly and exit. This protects
+#         against an edge case where a partially-trusted production
+#         cert (e.g. cross-sign issue, expired Microsoft cert, or a
+#         cert whose chain is broken for environmental reasons) would
+#         otherwise be silently replaced with a self-signed dev cert.
+#         Operator can manually inspect with Get-AuthenticodeSignature
+#         and decide what to do.
 $sacOn = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' `
     -Name 'VerifiedAndReputablePolicyState' -ErrorAction SilentlyContinue).VerifiedAndReputablePolicyState
 if ($sacOn -eq 1) {
     $existing = Get-AuthenticodeSignature -FilePath $hostExe
     if ($existing.Status -eq "Valid") {
-        # Production signature with trusted chain — don't touch.
-        Write-Output "Existing signature is Valid (chain trusted) — skipping dev re-sign."
-        Write-Output "  Signer: $($existing.SignerCertificate.Subject)"
-        Write-Output "  Issuer: $($existing.SignerCertificate.Issuer)"
+        Write-Output "Existing signature is Valid (chain trusted) - skipping dev re-sign."
+        Write-Output ("  Signer: {0}" -f $existing.SignerCertificate.Subject)
+        Write-Output ("  Issuer: {0}" -f $existing.SignerCertificate.Issuer)
+        Write-Output ("  Thumb:  {0}" -f $existing.SignerCertificate.Thumbprint)
     } else {
-        # NotSigned or UnknownError (e.g. self-signed) — dev path applies.
         $devCert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq 'CN=VaultSign Dev' } | Select-Object -First 1
+        $existingSubject = if ($existing.SignerCertificate) { $existing.SignerCertificate.Subject } else { $null }
+        $existingThumb = if ($existing.SignerCertificate) { $existing.SignerCertificate.Thumbprint } else { $null }
+
         if ($null -eq $devCert) {
             Write-Warning "Smart App Control is on but no CN=VaultSign Dev cert in CurrentUser\My - Chrome will fail to launch the host."
             Write-Warning "Generate one and re-run:"
             Write-Warning '  $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=VaultSign Dev" -CertStoreLocation Cert:\CurrentUser\My -KeyUsage DigitalSignature -KeyAlgorithm RSA -KeyLength 2048 -NotAfter (Get-Date).AddYears(2)'
-        } elseif ($existing.SignerCertificate -and $existing.SignerCertificate.Thumbprint -eq $devCert.Thumbprint) {
-            # Already signed with current dev cert; SAC re-evaluates each
-            # launch so the signature is still good — no work needed.
-            Write-Output "Binary already signed with current dev cert ($($devCert.Thumbprint)) — skipping."
-        } else {
+        } elseif ($existingThumb -eq $devCert.Thumbprint) {
+            Write-Output ("Binary already signed with current dev cert ({0}) - skipping." -f $devCert.Thumbprint)
+        } elseif ($existing.Status -eq "NotSigned" -or $existingSubject -eq "CN=VaultSign Dev") {
+            # Either unsigned, or signed with a stale "CN=VaultSign Dev"
+            # cert (different thumbprint, e.g. older dev cert that was
+            # regenerated). Safe to overwrite.
             Set-AuthenticodeSignature -FilePath $hostExe -Certificate $devCert | Out-Null
-            Write-Output "Re-signed $hostExe with dev cert $($devCert.Thumbprint)"
+            Write-Output ("Signed {0} with dev cert {1}" -f $hostExe, $devCert.Thumbprint)
+        } else {
+            Write-Warning ("Binary is signed (Status={0}) by an UNKNOWN certificate:" -f $existing.Status)
+            Write-Warning ("  Subject:    {0}" -f $existingSubject)
+            Write-Warning ("  Thumbprint: {0}" -f $existingThumb)
+            Write-Warning "Refusing to replace this signature with the dev cert."
+            Write-Warning "If you want to force a dev re-sign, run manually:"
+            Write-Warning ('  Set-AuthenticodeSignature -FilePath "{0}" -Certificate (Get-ChildItem Cert:\CurrentUser\My\{1})' -f $hostExe, $devCert.Thumbprint)
+            Write-Warning "Otherwise the existing signature stays and Chrome may fail to launch the host under SAC."
         }
     }
 }

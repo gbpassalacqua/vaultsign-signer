@@ -1,18 +1,13 @@
-# Build & sign vaultsign-host.exe on tagged releases.
+# Build & sign vaultsign-host.exe on tagged releases via Microsoft
+# Trusted Signing (Azure-managed code-signing certificate).
 #
 # Triggered by:
 #   - Push of a `v*` tag (cuts a release).
 #   - Manual `workflow_dispatch` (for testing the build path).
 #
-# Signing strategy (active provider gated by repo variables):
-#   ACTIVE_SIGNING_PROVIDER=trusted-signing  → Microsoft Trusted Signing
-#   ACTIVE_SIGNING_PROVIDER=signpath         → SignPath.io (Foundation cert)
-#   ACTIVE_SIGNING_PROVIDER=none             → unsigned build, dev only
-#
-# All signing secrets are placeholders today — fill in once an account
-# is provisioned. The unsigned artifact will still be produced; the
-# signing step will be skipped if the active provider's secrets aren't
-# set, with a warning in the workflow logs.
+# The Trusted Signing step is gated on the AZURE_TRUSTED_SIGNING_ACCOUNT
+# variable being set — when empty, the workflow still produces an
+# unsigned build artifact (useful for testing pre-cert).
 
 name: build-sign-release
 
@@ -28,16 +23,11 @@ on:
 
 permissions:
   contents: write   # required to attach assets to the release
-  id-token: write   # Azure OIDC login (Trusted Signing path)
+  id-token: write   # Azure OIDC federated login (no secret needed)
 
 jobs:
   build:
     runs-on: windows-latest
-
-    env:
-      # Override via repo settings → Variables to switch providers
-      # without editing this file.
-      ACTIVE_SIGNING_PROVIDER: ${{ vars.ACTIVE_SIGNING_PROVIDER || 'none' }}
 
     steps:
       - name: Checkout
@@ -89,22 +79,25 @@ jobs:
           Set-Content -Path build-provenance.json -Value $info -Encoding utf8NoBOM
           Get-Content build-provenance.json
 
-      # ── Microsoft Trusted Signing path ─────────────────────────
-      - name: Azure login (Trusted Signing)
-        if: env.ACTIVE_SIGNING_PROVIDER == 'trusted-signing'
+      # ── Sign via Microsoft Trusted Signing ───────────────────
+      # Skipped entirely if AZURE_TRUSTED_SIGNING_ACCOUNT is empty
+      # (e.g. before the Azure account is provisioned). The unsigned
+      # binary is still attached to the release in that case.
+
+      - name: Azure login (OIDC federated, no secret)
+        if: vars.AZURE_TRUSTED_SIGNING_ACCOUNT != ''
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Sign via Microsoft Trusted Signing
-        if: env.ACTIVE_SIGNING_PROVIDER == 'trusted-signing'
+      - name: Sign with Trusted Signing
+        if: vars.AZURE_TRUSTED_SIGNING_ACCOUNT != ''
         uses: azure/trusted-signing-action@v0.5.1
         with:
-          # Endpoint comes from the Trusted Signing account region.
-          # Replace eus / your account name / your cert profile name
-          # once provisioned.
+          # Endpoint is region-scoped. Set AZURE_TRUSTED_SIGNING_ENDPOINT
+          # as a repo variable if your account isn't in East US.
           endpoint: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT || 'https://eus.codesigning.azure.net' }}
           trusted-signing-account-name: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ vars.AZURE_TRUSTED_SIGNING_PROFILE }}
@@ -114,32 +107,8 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
-      # ── SignPath.io path ───────────────────────────────────────
-      - name: Upload unsigned artifact for SignPath
-        if: env.ACTIVE_SIGNING_PROVIDER == 'signpath'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vaultsign-host-unsigned
-          path: host/vaultsign-host.exe
-          if-no-files-found: error
-
-      - name: Submit to SignPath for signing
-        if: env.ACTIVE_SIGNING_PROVIDER == 'signpath'
-        uses: signpath/github-action-submit-signing-request@v1.2
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'vaultsign-signer' }}
-          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
-          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_SLUG || 'vaultsign-host-exe' }}
-          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: host
-          wait-for-completion-timeout-in-seconds: 1800   # 30 min — covers manual approval
-
-      # ── Verify signature (any provider) ───────────────────────
       - name: Verify Authenticode signature
-        if: env.ACTIVE_SIGNING_PROVIDER != 'none'
+        if: vars.AZURE_TRUSTED_SIGNING_ACCOUNT != ''
         shell: pwsh
         working-directory: host
         run: |
@@ -151,7 +120,7 @@ jobs:
           }
           $sig.SignerCertificate | Format-List Subject, Issuer, NotAfter, Thumbprint
 
-      # ── Stage release artifacts ───────────────────────────────
+      # ── Stage + publish release artifacts ────────────────────
       - name: Stage release artifacts
         shell: pwsh
         run: |
@@ -161,17 +130,15 @@ jobs:
           Copy-Item dist\vaultsign-signer-*.zip   release\ -ErrorAction SilentlyContinue
           Copy-Item LICENSE                       release\
           Copy-Item README.md                     release\
-          Copy-Item CODE_SIGNING_POLICY.md        release\
           Get-ChildItem release\ | Format-Table Name, Length
 
-      - name: Upload final signed artifacts
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: vaultsign-signer-${{ steps.tag.outputs.name }}
           path: release/
           if-no-files-found: error
 
-      # ── Attach to GitHub Release (only on tag push) ───────────
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2

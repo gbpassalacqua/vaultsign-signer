@@ -1,21 +1,21 @@
 # VaultSign Signer
 
-Chrome extension + Go native host that exposes Brazilian **ICP-Brasil**
-digital certificates (installed on the user's Windows machine, accessed
-via Windows CryptoAPI / CNG) to a Chromium-based browser through the
-Native Messaging API.
+Chrome extension + Windows native host that lets
+[VaultSign](https://vaultsign.app) access ICP-Brasil digital
+certificates installed on the signer's machine and produce a real
+PKCS#7 / CAdES signature over the PDF hash. VaultSign is a
+commercial Brazilian e-signature platform; this repo is the local
+helper that puts the user's certificate to work without the private
+key ever leaving the machine.
 
-The host returns a detached CMS / PKCS#7 SignedData over a 32-byte
-SHA-256 digest supplied by the caller. The private key **never leaves
-the user's machine** — only the digest crosses the wire to the host,
-and the resulting PKCS#7 (~3 KB) crosses back.
+Only a SHA-256 digest (32 bytes) crosses the wire from the page to
+the host; the host returns the detached PKCS#7 (~3 KB) and the X.509
+cert DER. The page (or any other Chromium extension that knows the
+protocol) ships that PKCS#7 to its backend, which embeds it into the
+PDF /Sig placeholder.
 
-[vaultsign.app](https://vaultsign.app) is the reference integration,
-but the wire protocol is documented below and any web application (or
-any other Chromium extension) can use the host. The host knows nothing
-about VaultSign specifically — it speaks a generic
-*"give me a list of ICP-Brasil certs / sign this hash with cert X"*
-protocol.
+Released MIT so any other Brazilian e-signature product can build on
+it; in practice the only consumer today is `vaultsign.app`.
 
 ## Status
 
@@ -26,23 +26,9 @@ service worker → native host → Windows CryptoAPI → PKCS#7 back.
 Roadmap (not started):
 - macOS / Linux native host
 - Public installer (`/install` site + `.msi` / Inno Setup wizard)
+  signed by Microsoft Trusted Signing
 - A3 token (smart card / USB token) — currently only A1 (cert imported
   into `CurrentUser\My`) is tested end-to-end
-
-## Why this exists
-
-Brazilian electronic-signature applications that target ICP-Brasil
-qualified signatures (validable at [validar.iti.gov.br](https://validar.iti.gov.br))
-need access to the user's local certificate store. Browsers don't
-expose CryptoAPI directly, so the canonical pattern is:
-
-```
-browser → extension → Native Messaging → native helper → Windows cert store
-```
-
-This repo is that helper, plus the extension that bridges the page to
-it. Both are MIT-licensed and reusable by anyone building Brazilian
-e-signature software.
 
 ## Prerequisites
 
@@ -73,10 +59,9 @@ Smart App Control on Windows 11 blocks unsigned binaries that touch
 binaries; recent updates check the certificate trust chain and reject
 self-signed. Two paths today:
 
-1. **Production-signed binary.** The CI workflow signs the host with a
-   Microsoft-trusted cert (Microsoft Trusted Signing or EV code
-   signing). SAC accepts these without user action. End-users get a
-   signed installer.
+1. **Production-signed binary.** The CI workflow signs the host with
+   Microsoft Trusted Signing. SAC accepts these without user action.
+   End-users get a signed installer.
 2. **Self-sign the dev build (developer machines only).** Useful when
    iterating locally; works only if SAC is off or in evaluation mode.
 
@@ -119,7 +104,7 @@ entry pointing Chrome at the manifest.
 
 Skip this step if your binary is already production-signed by CI. The
 included `host/scripts/install-native-host.ps1` detects an existing
-valid signature and skips re-signing automatically.
+valid (trusted-chain) signature and skips re-signing automatically.
 
 ```powershell
 $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq 'CN=VaultSign Dev' } | Select-Object -First 1
@@ -191,8 +176,7 @@ link, look for `[vaultsign-bg] -> host` and `<- host` lines.
 The page talks to the extension over `window.postMessage` or
 `chrome.runtime.sendMessage`; the extension forwards to the host over
 length-prefixed JSON Native Messaging (4-byte little-endian length +
-UTF-8 JSON body). All three actions are generic enough that any caller
-can adopt the protocol:
+UTF-8 JSON body).
 
 ```
 ping:
@@ -215,11 +199,11 @@ signHash:
 separators) — used as the cert handle in the Windows store.
 
 `hash` is the base64-encoded 32-byte SHA-256 digest the caller wants
-signed. The host re-acquires the key container under
-`PROV_RSA_AES` (Microsoft Enhanced RSA and AES CSP) so SHA-256 works
-even when the cert was imported under a legacy CSP that only supports
-SHA-1 (a common situation for ICP-Brasil certs from older PKCS#12
-files — see [`NOTES.md`](./NOTES.md) for the gory details).
+signed. The host re-acquires the key container under `PROV_RSA_AES`
+(Microsoft Enhanced RSA and AES CSP) so SHA-256 works even when the
+cert was imported under a legacy CSP that only supports SHA-1 (a
+common situation for ICP-Brasil certs from older PKCS#12 files — see
+[`NOTES.md`](./NOTES.md) for the gory details).
 
 `signature` is a **detached CMS / PKCS#7 SignedData**. Today it's
 CAdES-BES (signature directly over the input digest, no signedAttrs).
@@ -257,18 +241,7 @@ test/
   app.js                 # Talks to extension via window.postMessage
 ```
 
-## Code signing policy
-
-See [CODE_SIGNING_POLICY.md](./CODE_SIGNING_POLICY.md) for the project's
-release-signing process, role assignments, and privacy disclosures.
-
 ## License
 
 [MIT](./LICENSE) — Copyright (c) 2026 Giuliano Passalacqua /
 Rocket99 Ventures LLC.
-
-You can use this code in any project, commercial or otherwise, including
-forking the host and pointing it at a different application. The
-`allowed_origins` field in the Native Messaging manifest is the
-boundary — a fork that wants to serve a different browser extension
-just rebuilds with its own list.
