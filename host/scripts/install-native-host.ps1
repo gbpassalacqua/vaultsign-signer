@@ -46,22 +46,47 @@ if (-not (Test-Path $templatePath)) {
     exit 1
 }
 
-# Authenticode-sign the binary if Smart App Control is on, otherwise it
-# silently fails to launch when Chrome spawns it. The sig fails verification
-# (self-signed, not in any trust store) but its mere presence is enough.
+# Authenticode-sign the binary if Smart App Control is on AND the
+# binary doesn't already carry a valid (trusted-chain) signature.
+#
+# Three signature states matter:
+#   1. Valid                - production-signed (Trusted Signing / SignPath
+#                             / EV cert). Trust chain reaches a CA in the
+#                             Microsoft Trusted Root Program. Leave it
+#                             ALONE — re-signing with the dev cert would
+#                             downgrade it.
+#   2. UnknownError /        - signed but trust chain doesn't terminate
+#      NotTrusted              at a trusted root (self-signed dev cert,
+#                              or signed by a cert removed from the store).
+#                              Re-sign with the current dev cert.
+#   3. NotSigned             - no signature at all. Sign with dev cert.
+#
+# State (1) is the new normal once CI starts shipping signed binaries —
+# devs should be able to drop a release artifact into host/ and run this
+# script without it stomping the production signature.
 $sacOn = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' `
     -Name 'VerifiedAndReputablePolicyState' -ErrorAction SilentlyContinue).VerifiedAndReputablePolicyState
 if ($sacOn -eq 1) {
-    $devCert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq 'CN=VaultSign Dev' } | Select-Object -First 1
-    if ($null -eq $devCert) {
-        Write-Warning "Smart App Control is on but no CN=VaultSign Dev cert in CurrentUser\My - Chrome will fail to launch the host."
-        Write-Warning "Generate one and re-run:"
-        Write-Warning '  $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=VaultSign Dev" -CertStoreLocation Cert:\CurrentUser\My -KeyUsage DigitalSignature -KeyAlgorithm RSA -KeyLength 2048 -NotAfter (Get-Date).AddYears(2)'
+    $existing = Get-AuthenticodeSignature -FilePath $hostExe
+    if ($existing.Status -eq "Valid") {
+        # Production signature with trusted chain — don't touch.
+        Write-Output "Existing signature is Valid (chain trusted) — skipping dev re-sign."
+        Write-Output "  Signer: $($existing.SignerCertificate.Subject)"
+        Write-Output "  Issuer: $($existing.SignerCertificate.Issuer)"
     } else {
-        $existing = Get-AuthenticodeSignature -FilePath $hostExe
-        if ($existing.SignerCertificate.Thumbprint -ne $devCert.Thumbprint) {
+        # NotSigned or UnknownError (e.g. self-signed) — dev path applies.
+        $devCert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq 'CN=VaultSign Dev' } | Select-Object -First 1
+        if ($null -eq $devCert) {
+            Write-Warning "Smart App Control is on but no CN=VaultSign Dev cert in CurrentUser\My - Chrome will fail to launch the host."
+            Write-Warning "Generate one and re-run:"
+            Write-Warning '  $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=VaultSign Dev" -CertStoreLocation Cert:\CurrentUser\My -KeyUsage DigitalSignature -KeyAlgorithm RSA -KeyLength 2048 -NotAfter (Get-Date).AddYears(2)'
+        } elseif ($existing.SignerCertificate -and $existing.SignerCertificate.Thumbprint -eq $devCert.Thumbprint) {
+            # Already signed with current dev cert; SAC re-evaluates each
+            # launch so the signature is still good — no work needed.
+            Write-Output "Binary already signed with current dev cert ($($devCert.Thumbprint)) — skipping."
+        } else {
             Set-AuthenticodeSignature -FilePath $hostExe -Certificate $devCert | Out-Null
-            Write-Output "Re-signed $hostExe with $($devCert.Thumbprint)"
+            Write-Output "Re-signed $hostExe with dev cert $($devCert.Thumbprint)"
         }
     }
 }

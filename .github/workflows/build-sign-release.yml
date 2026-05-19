@@ -1,0 +1,185 @@
+# Build & sign vaultsign-host.exe on tagged releases.
+#
+# Triggered by:
+#   - Push of a `v*` tag (cuts a release).
+#   - Manual `workflow_dispatch` (for testing the build path).
+#
+# Signing strategy (active provider gated by repo variables):
+#   ACTIVE_SIGNING_PROVIDER=trusted-signing  → Microsoft Trusted Signing
+#   ACTIVE_SIGNING_PROVIDER=signpath         → SignPath.io (Foundation cert)
+#   ACTIVE_SIGNING_PROVIDER=none             → unsigned build, dev only
+#
+# All signing secrets are placeholders today — fill in once an account
+# is provisioned. The unsigned artifact will still be produced; the
+# signing step will be skipped if the active provider's secrets aren't
+# set, with a warning in the workflow logs.
+
+name: build-sign-release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Pretend this tag fired the workflow (for dispatch testing)"
+        required: false
+        default: "v0.0.0-dev"
+
+permissions:
+  contents: write   # required to attach assets to the release
+  id-token: write   # Azure OIDC login (Trusted Signing path)
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    env:
+      # Override via repo settings → Variables to switch providers
+      # without editing this file.
+      ACTIVE_SIGNING_PROVIDER: ${{ vars.ACTIVE_SIGNING_PROVIDER || 'none' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag name
+        id: tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag.StartsWith("v")) {
+            $tag = "${{ inputs.tag_name }}"
+          }
+          if (-not $tag) { $tag = "v0.0.0-dev" }
+          "name=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Output "Resolved tag: $tag"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: host/go.sum
+
+      - name: Build host binary
+        shell: pwsh
+        working-directory: host
+        run: |
+          $ldflags = "-s -w -X main.version=${{ steps.tag.outputs.name }} -X main.commit=$env:GITHUB_SHA"
+          go build -ldflags "$ldflags" -o vaultsign-host.exe .\cmd\vaultsign-host
+          Get-FileHash vaultsign-host.exe -Algorithm SHA256 |
+            Format-List Algorithm, Hash, Path
+          (Get-Item vaultsign-host.exe).Length |
+            ForEach-Object { "size = $_ bytes" }
+
+      - name: Capture build provenance (unsigned hash)
+        shell: pwsh
+        working-directory: host
+        run: |
+          $info = @{
+            tag       = "${{ steps.tag.outputs.name }}"
+            commit    = "$env:GITHUB_SHA"
+            runner    = "$env:RUNNER_OS $env:RUNNER_ARCH"
+            go_version = (go version)
+            sha256    = (Get-FileHash vaultsign-host.exe -Algorithm SHA256).Hash
+            built_at  = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ").ToString()
+            workflow  = "$env:GITHUB_WORKFLOW @ $env:GITHUB_RUN_ID"
+          } | ConvertTo-Json
+          Set-Content -Path build-provenance.json -Value $info -Encoding utf8NoBOM
+          Get-Content build-provenance.json
+
+      # ── Microsoft Trusted Signing path ─────────────────────────
+      - name: Azure login (Trusted Signing)
+        if: env.ACTIVE_SIGNING_PROVIDER == 'trusted-signing'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign via Microsoft Trusted Signing
+        if: env.ACTIVE_SIGNING_PROVIDER == 'trusted-signing'
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          # Endpoint comes from the Trusted Signing account region.
+          # Replace eus / your account name / your cert profile name
+          # once provisioned.
+          endpoint: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT || 'https://eus.codesigning.azure.net' }}
+          trusted-signing-account-name: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_TRUSTED_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\host
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # ── SignPath.io path ───────────────────────────────────────
+      - name: Upload unsigned artifact for SignPath
+        if: env.ACTIVE_SIGNING_PROVIDER == 'signpath'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vaultsign-host-unsigned
+          path: host/vaultsign-host.exe
+          if-no-files-found: error
+
+      - name: Submit to SignPath for signing
+        if: env.ACTIVE_SIGNING_PROVIDER == 'signpath'
+        uses: signpath/github-action-submit-signing-request@v1.2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'vaultsign-signer' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_SLUG || 'vaultsign-host-exe' }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: host
+          wait-for-completion-timeout-in-seconds: 1800   # 30 min — covers manual approval
+
+      # ── Verify signature (any provider) ───────────────────────
+      - name: Verify Authenticode signature
+        if: env.ACTIVE_SIGNING_PROVIDER != 'none'
+        shell: pwsh
+        working-directory: host
+        run: |
+          $sig = Get-AuthenticodeSignature -FilePath vaultsign-host.exe
+          $sig | Format-List Path, Status, StatusMessage
+          if ($sig.Status -ne "Valid") {
+            Write-Error "Signature validation failed: $($sig.Status) — $($sig.StatusMessage)"
+            exit 1
+          }
+          $sig.SignerCertificate | Format-List Subject, Issuer, NotAfter, Thumbprint
+
+      # ── Stage release artifacts ───────────────────────────────
+      - name: Stage release artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          Copy-Item host\vaultsign-host.exe       release\
+          Copy-Item host\build-provenance.json    release\
+          Copy-Item dist\vaultsign-signer-*.zip   release\ -ErrorAction SilentlyContinue
+          Copy-Item LICENSE                       release\
+          Copy-Item README.md                     release\
+          Copy-Item CODE_SIGNING_POLICY.md        release\
+          Get-ChildItem release\ | Format-Table Name, Length
+
+      - name: Upload final signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vaultsign-signer-${{ steps.tag.outputs.name }}
+          path: release/
+          if-no-files-found: error
+
+      # ── Attach to GitHub Release (only on tag push) ───────────
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          files: |
+            release/vaultsign-host.exe
+            release/build-provenance.json
+            release/vaultsign-signer-*.zip
+          fail_on_unmatched_files: false
+          generate_release_notes: true
