@@ -50,11 +50,12 @@ ShowLanguageDialog=auto
 Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
 Name: "english";             MessagesFile: "compiler:Default.isl"
 
-[InstallDelete]
-; Wipe any pre-existing manifest from a previous (possibly aborted)
-; install of the same product. The fresh manifest is written in [Code]
-; below during ssInstall.
-Type: files; Name: "{app}\{#ManifestName}"
+; NOTE: We intentionally do NOT have an [InstallDelete] section for the
+; manifest. Inno processes [InstallDelete] AFTER ssInstall but BEFORE
+; [Files], which would delete the manifest we just wrote in ssInstall.
+; The manifest is written with SaveStringToFile(append=False) which always
+; overwrites, so any stray residual from an aborted install is replaced
+; cleanly. Discovered in v0.1.4 cliente-leigo install test.
 
 [Files]
 ; The helper is staged into this directory by the CI workflow (or by the
@@ -98,10 +99,10 @@ Type: dirifempty; Name: "{localappdata}\VaultSign"
 // Chrome's parser sees "C:\\Users\\..." not "C:\Users\...".
 //
 // Called from CurStepChanged(ssInstall) — Inno fires that step BEFORE the
-// InstallDelete/Files/Registry/Icons/Run sections are processed. That
-// ordering is what we want: the manifest must exist on disk by the time
-// [Registry] writes the HKCU pointer to it, otherwise the registry would
-// reference a missing file.
+// Files/Registry/Icons/Run sections are processed. That ordering is what
+// we want: the manifest must exist on disk by the time [Registry] writes
+// the HKCU pointer to it, otherwise the registry would reference a
+// missing file.
 //
 // CAVEAT — {app} does NOT exist yet at ssInstall. Inno normally creates
 // {app} either when the user navigates the DirPage ("Select install
