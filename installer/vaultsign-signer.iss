@@ -97,21 +97,38 @@ Type: dirifempty; Name: "{localappdata}\VaultSign"
 // the freshly-installed helper. We escape backslashes for JSON encoding so
 // Chrome's parser sees "C:\\Users\\..." not "C:\Users\...".
 //
-// Called from CurStepChanged(ssInstall) — Inno fires that step AFTER the
-// {app} directory is created but BEFORE the InstallDelete/Files/Registry/
-// Icons/Run sections are processed. So the manifest exists on disk by the
-// time the registry section writes the HKCU pointer to it, eliminating
-// the "registry exists, manifest missing" failure mode.
+// Called from CurStepChanged(ssInstall) — Inno fires that step BEFORE the
+// InstallDelete/Files/Registry/Icons/Run sections are processed. That
+// ordering is what we want: the manifest must exist on disk by the time
+// [Registry] writes the HKCU pointer to it, otherwise the registry would
+// reference a missing file.
 //
-// If the write fails (disk full, permission denied, etc.) we Abort the
-// install — Inno tears down anything already touched and the user is
-// left with a clean machine.
+// CAVEAT — {app} does NOT exist yet at ssInstall. Inno normally creates
+// {app} either when the user navigates the DirPage ("Select install
+// location") or when the [Files] section copies its first file there.
+// With DisableDirPage=yes we skip the DirPage entirely, so {app} is only
+// created during [Files] — too late for our ssInstall write. We call
+// ForceDirectories ourselves before writing the manifest.
+//
+// If anything fails (cannot create dir, disk full, permission denied,
+// etc.) we Abort the install — Inno tears down anything already touched
+// and the user is left with a clean machine.
 procedure WriteNativeHostManifest();
 var
   ManifestPath: string;
   HostPath:     string;
   JsonContent:  string;
+  AppDir:       string;
 begin
+  AppDir := ExpandConstant('{app}');
+  if not ForceDirectories(AppDir) then
+  begin
+    MsgBox('Falha ao criar a pasta de instalacao ' + AppDir +
+           '. A instalacao sera cancelada.',
+           mbCriticalError, MB_OK);
+    Abort;
+  end;
+
   HostPath := ExpandConstant('{app}\{#HostExeName}');
   StringChangeEx(HostPath, '\', '\\', True);
 
