@@ -120,16 +120,79 @@ jobs:
           }
           $sig.SignerCertificate | Format-List Subject, Issuer, NotAfter, Thumbprint
 
+      # ── Build the per-user Windows installer (Inno Setup) ────
+      # Bundles the already-signed helper into a single Setup.exe that
+      # a non-technical user can double-click. The outer Setup.exe is
+      # signed in a second pass below so SmartScreen sees a Trusted
+      # Signing signature on the wrapper too.
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Stage signed helper into installer directory
+        shell: pwsh
+        run: |
+          Copy-Item host\vaultsign-host.exe installer\vaultsign-host.exe -Force
+          $sig = Get-AuthenticodeSignature -FilePath installer\vaultsign-host.exe
+          Write-Output "Staged helper signature status: $($sig.Status)"
+
+      - name: Resolve installer AppVersion (strip leading v)
+        id: installer_version
+        shell: pwsh
+        run: |
+          $version = '${{ steps.tag.outputs.name }}'.TrimStart('v')
+          "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Output "Installer AppVersion: $version"
+
+      - name: Compile installer with Inno Setup
+        shell: pwsh
+        run: |
+          iscc /DAppVersion=${{ steps.installer_version.outputs.value }} installer\vaultsign-signer.iss
+          Get-ChildItem installer\Output | Format-Table Name, Length
+
+      - name: Sign installer with Trusted Signing
+        if: vars.AZURE_TRUSTED_SIGNING_ACCOUNT != ''
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          endpoint: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT || 'https://eus.codesigning.azure.net' }}
+          trusted-signing-account-name: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_TRUSTED_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\installer\Output
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify installer signature
+        if: vars.AZURE_TRUSTED_SIGNING_ACCOUNT != ''
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem installer\Output\VaultSignSigner-Setup-*.exe |
+                   Select-Object -First 1
+          if (-not $setup) {
+            Write-Error "Installer not found under installer\Output\"
+            exit 1
+          }
+          $sig = Get-AuthenticodeSignature -FilePath $setup.FullName
+          $sig | Format-List Path, Status, StatusMessage
+          if ($sig.Status -ne "Valid") {
+            Write-Error "Installer signature validation failed: $($sig.Status) — $($sig.StatusMessage)"
+            exit 1
+          }
+          $sig.SignerCertificate | Format-List Subject, Issuer, NotAfter, Thumbprint
+
       # ── Stage + publish release artifacts ────────────────────
       - name: Stage release artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path release -Force | Out-Null
-          Copy-Item host\vaultsign-host.exe       release\
-          Copy-Item host\build-provenance.json    release\
-          Copy-Item dist\vaultsign-signer-*.zip   release\ -ErrorAction SilentlyContinue
-          Copy-Item LICENSE                       release\
-          Copy-Item README.md                     release\
+          Copy-Item host\vaultsign-host.exe                       release\
+          Copy-Item host\build-provenance.json                    release\
+          Copy-Item dist\vaultsign-signer-*.zip                   release\ -ErrorAction SilentlyContinue
+          Copy-Item installer\Output\VaultSignSigner-Setup-*.exe  release\ -ErrorAction SilentlyContinue
+          Copy-Item LICENSE                                       release\
+          Copy-Item README.md                                     release\
           Get-ChildItem release\ | Format-Table Name, Length
 
       - name: Upload workflow artifact
@@ -148,5 +211,6 @@ jobs:
             release/vaultsign-host.exe
             release/build-provenance.json
             release/vaultsign-signer-*.zip
+            release/VaultSignSigner-Setup-*.exe
           fail_on_unmatched_files: false
           generate_release_notes: true
