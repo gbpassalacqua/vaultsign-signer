@@ -21,7 +21,7 @@ import (
 	"github.com/gbpassalacqua/vaultsign-signer/host/internal/protocol"
 )
 
-const version = "0.1.0"
+const version = "0.1.6"
 
 type request struct {
 	Action string `json:"action"`
